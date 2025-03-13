@@ -23,7 +23,7 @@ local oHelp = options.help or options.h
 local oVersion = options.version or options.V
 local oSync = options.sync or options.S
 
-if #args == 0 or oHelp then
+if oHelp then
     usage()
     return 1
 end
