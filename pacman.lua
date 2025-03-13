@@ -59,7 +59,7 @@ if options.S then
         shell.execute(string.format('mkdir LGT'))
         shell.execute(string.format('cd LGT'))
         for _, v in pairs(scripts) do
-           shell.execute(string.format('wget -f %s%s', repo, v)) 
+           shell.execute(string.format('wget -f %s%s %s', repo, v, v)) 
         end
         print("Successfully installed LGT")
     end
