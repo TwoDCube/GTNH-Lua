@@ -16,6 +16,7 @@ operations:
 use 'pacman {-h --help}' with an operation for available options
 ]])
 end
+local repo = "https://raw.githubusercontent.com/TwoDCube/GTNH-Lua/refs/heads/master/"
 
 local args, options = shell.parse(...)
 
@@ -43,8 +44,24 @@ if oVersion then
     return 0
 end
 
-
 if options.S then
-    
+    if #args == 0 then
+        usage()
+        return 1
+    end
+
+    if args[1] == "LGT" then
+        local scripts = {
+            'LGT/LGT.lua'
+        }
+
+
+        shell.execute(string.format('mkdir LGT'))
+        shell.execute(string.format('cd LGT'))
+        for _, v in pairs(scripts) do
+           shell.execute(string.format('wget -f %s%s', repo, v)) 
+        end
+        print("Successfully installed LGT")
+    end
     return 0
 end
