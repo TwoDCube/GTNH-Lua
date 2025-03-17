@@ -52,7 +52,8 @@ if options.S then
 
     if args[1] == "LGT" then
         local scripts = {
-            'LGT/LGT.lua'
+            'LGT/LGT.lua',
+            'LGT/events.lua'
         }
 
 
