@@ -44,6 +44,7 @@ end
 
 local function main()
     print('start LGT')
+    events.initEvents()
     events.hookEvents()
 
     while loop() do
