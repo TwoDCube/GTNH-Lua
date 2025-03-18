@@ -1,5 +1,6 @@
-# GTNH pacman
+# GTNH-Lua
 
 ```bash
-wget -f https://raw.githubusercontent.com/TwoDCube/GTNH-Lua/refs/heads/master/pacman.lua
+oppm register TwoDCube/GTNH-Lua
+oppm install LGT
 ```
