@@ -2,5 +2,5 @@
 
 ```bash
 oppm register TwoDCube/GTNH-Lua
-oppm install LGT
+oppm install lgt
 ```
