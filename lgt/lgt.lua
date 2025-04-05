@@ -34,7 +34,7 @@ local function loop()
     end
 
     if charging then
-        component.transposer.transferFluid(sides.up, sides.down, 1000000)
+        component.transposer.transferFluid(sides.down, sides.up, 1000000)
     end
     os.sleep(0.05) -- 1 tick
 
