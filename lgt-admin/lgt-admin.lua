@@ -23,7 +23,7 @@ local function loop()
     end
 
     broadcast()
-    os.sleep(0.05) -- 1 tick
+    os.sleep(1) -- 20 ticks
 
     return true
 end
