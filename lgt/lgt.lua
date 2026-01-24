@@ -1,31 +1,28 @@
 local events = require('events')
 local component = require('component')
+local event = require('event')
 local sides = require('sides')
 
-local function formatEU(value)
-    if value >= 1e12 then
-        return string.format("%.2f TEU", value / 1e12)
-    elseif value >= 1e9 then
-        return string.format("%.2f GEU", value / 1e9)
-    elseif value >= 1e6 then
-        return string.format("%.2f MEU", value / 1e6)
-    elseif value >= 1e3 then
-        return string.format("%.2f kEU", value / 1e3)
-    else
-        return string.format("%.0f EU", value)
+local modem = component.modem
+local redstone = component.redstone
+local PORT = 1337
+
+local currentEU = 0
+local totalEU = 1
+
+local function onBatteryData(_, _, _, _, _, msgType, current, total)
+    if msgType == "lgt_battery" then
+        currentEU = current
+        totalEU = total
     end
 end
 
 local function isBatteryPercentageAbove(percentage)
-    local current = component.gt_machine.getEUStored()
-    local total = component.gt_machine.getEUMaxStored()
-    local percent = current / total
-
+    local percent = currentEU / totalEU
     return percent > percentage
 end
 
 local charging = true
-local redstone = component.redstone
 local function loop()
     if events.needExit() then
         print('received exit command')
@@ -49,15 +46,20 @@ local function loop()
     return true
 end
 
-
 local function main()
     print('start LGT')
     events.initEvents()
     events.hookEvents()
 
+    modem.open(PORT)
+    event.listen("modem_message", onBatteryData)
+    print('listening on port ' .. PORT)
+
     while loop() do
     end
 
+    event.ignore("modem_message", onBatteryData)
+    modem.close(PORT)
     events.unhookEvents()
     print('stop LGT')
 end
