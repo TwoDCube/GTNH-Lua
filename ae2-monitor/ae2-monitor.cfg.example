@@ -1,0 +1,3 @@
+pushgateway_url = "http://pushgateway.example.com:9091"
+username = "pushuser"
+password = "changeme"

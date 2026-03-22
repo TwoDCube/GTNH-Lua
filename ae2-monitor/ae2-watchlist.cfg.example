@@ -1,0 +1,5 @@
+# AE2 item watchlist - one item per line
+# Format: modid:itemname or modid:itemname:damage
+# Examples:
+# minecraft:iron_ingot
+# gregtech:gt.metaitem.01:32072
