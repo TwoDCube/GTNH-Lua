@@ -79,7 +79,9 @@ local config = loadConfig(CONFIG_PATH)
 local authHeader = "Basic " .. base64encode(config.username .. ":" .. config.password)
 local me = component.me_interface
 local fmt = string.format
-local pushUrl = fmt("%s/metrics/job/%s/instance/%s",
+local pushUrlAggregate = fmt("%s/metrics/job/%s/instance/%s",
+    config.pushgateway_url, JOB_NAME, INSTANCE)
+local pushUrlItems = fmt("%s/metrics/job/%s_items/instance/%s",
     config.pushgateway_url, JOB_NAME, INSTANCE)
 local headers = {
     ["Content-Type"] = "text/plain; version=0.0.4",
@@ -97,12 +99,12 @@ local function safeCall(fn, ...)
     return nil
 end
 
-local function buildMetrics()
+-- Build aggregate metrics (power, CPUs, fluids, item totals) - small payload
+local function buildAggregateMetrics()
     local lines = {}
     local n = 0
     local function add(s) n = n + 1 lines[n] = s end
 
-    -- Power metrics
     add("# HELP ae2_power_injection Average power injection (AE/t)")
     add("# TYPE ae2_power_injection gauge")
     add(fmt("ae2_power_injection %.2f", safeCall(me.getAvgPowerInjection) or 0))
@@ -116,36 +118,16 @@ local function buildMetrics()
     add("# TYPE ae2_power_max gauge")
     add(fmt("ae2_power_max %.2f", safeCall(me.getMaxStoredPower) or 0))
 
-    -- Items: collect into dedup table, then yield, then format
+    -- Item totals (count only, no per-item strings)
     local itemTypes = 0
     local totalItems = 0
-    local seen = {}
     local iter = safeCall(me.allItems)
-
     if iter then
         for item in iter do
             itemTypes = itemTypes + 1
-            local size = item.size or 0
-            totalItems = totalItems + size
-            if size >= ITEM_MIN_COUNT then
-                local key = (item.name or "") .. "|" .. (item.label or "") .. "|" .. (item.damage or 0)
-                seen[key] = (seen[key] or 0) + size
-            end
+            totalItems = totalItems + (item.size or 0)
         end
     end
-
-    -- Yield after iterator to free proxy objects before building strings
-    os.sleep(0)
-
-    add("# HELP ae2_item_count Items stored per type")
-    add("# TYPE ae2_item_count gauge")
-    for key, size in pairs(seen) do
-        local name, label, damage = key:match("^(.-)|(.-)|(.+)$")
-        add(fmt('ae2_item_count{name="%s",label="%s",damage="%s"} %.0f',
-            sanitize(name), sanitize(label), damage, size))
-    end
-    seen = nil
-
     add("# HELP ae2_item_types Total unique item types")
     add("# TYPE ae2_item_types gauge")
     add(fmt("ae2_item_types %d", itemTypes))
@@ -187,6 +169,45 @@ local function buildMetrics()
         add(fmt("ae2_fluid_types %d", fluidTypes))
     end
 
+    return table.concat(lines, "\n") .. "\n"
+end
+
+-- Build per-item metrics separately (large payload, own memory lifecycle)
+local function buildItemMetrics()
+    -- Phase 1: iterate and deduplicate into seen table
+    local seen = {}
+    local iter = safeCall(me.allItems)
+    if not iter then return nil end
+
+    for item in iter do
+        local size = item.size or 0
+        if size >= ITEM_MIN_COUNT then
+            local key = (item.name or "") .. "|" .. (item.label or "") .. "|" .. (item.damage or 0)
+            seen[key] = (seen[key] or 0) + size
+        end
+    end
+
+    -- Yield to free iterator proxy objects
+    os.sleep(0)
+
+    -- Phase 2: build lines from seen table
+    local lines = {}
+    local n = 0
+    lines[1] = "# HELP ae2_item_count Items stored per type"
+    lines[2] = "# TYPE ae2_item_count gauge"
+    n = 2
+
+    for key, size in pairs(seen) do
+        local name, label, damage = key:match("^(.-)|(.-)|(.+)$")
+        n = n + 1
+        lines[n] = fmt('ae2_item_count{name="%s",label="%s",damage="%s"} %.0f',
+            sanitize(name), sanitize(label), damage, size)
+    end
+    seen = nil
+
+    -- Yield to free seen table before concat
+    os.sleep(0)
+
     local body = table.concat(lines, "\n") .. "\n"
     lines = nil
     return body
@@ -195,24 +216,19 @@ end
 -- Use raw component.internet with explicit close() to prevent handle leaks
 local inet = component.internet
 
-local function pushMetrics(body)
+local function pushMetrics(url, body)
     local handle
     local ok, err = pcall(function()
-        handle = inet.request(pushUrl, body, headers)
-        -- Wait for connection
+        handle = inet.request(url, body, headers)
         while true do
             local result, reason = handle.finishConnect()
             if result then break end
             if result == nil then error(reason or "connection failed") end
             os.sleep(0.05)
         end
-        -- Drain response
         while handle.read(1024) do end
     end)
-    -- Always close the handle
-    if handle then
-        pcall(handle.close)
-    end
+    if handle then pcall(handle.close) end
     if not ok then
         io.stderr:write("Push failed: " .. tostring(err) .. "\n")
     end
@@ -225,20 +241,30 @@ local function loop()
         return false
     end
 
-    os.sleep(0) -- yield to allow GC before collection
-
-    local ok, result = pcall(buildMetrics)
+    -- Phase 1: aggregate metrics (small, ~2KB)
+    os.sleep(0)
+    local ok, body = pcall(buildAggregateMetrics)
     if ok then
-        local size = #result
-        local pushed = pushMetrics(result)
-        result = nil
-        os.sleep(0) -- yield to free body string
+        pushMetrics(pushUrlAggregate, body)
+        body = nil
+    else
+        io.stderr:write("Aggregate failed: " .. tostring(body) .. "\n")
+    end
+
+    -- Phase 2: per-item metrics (large, separate lifecycle)
+    os.sleep(0)
+    ok, body = pcall(buildItemMetrics)
+    if ok and body then
+        local size = #body
+        local pushed = pushMetrics(pushUrlItems, body)
+        body = nil
+        os.sleep(0)
         if pushed then
-            print(fmt("pushed %dB [free: %.0fK]", size,
+            print(fmt("pushed %dB items [free: %.0fK]", size,
                 computer.freeMemory() / 1024))
         end
-    else
-        io.stderr:write("Collect failed: " .. tostring(result) .. "\n")
+    elseif not ok then
+        io.stderr:write("Items failed: " .. tostring(body) .. "\n")
     end
 
     os.sleep(PUSH_INTERVAL)
