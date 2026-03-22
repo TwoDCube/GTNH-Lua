@@ -1,29 +1,14 @@
 -- AE2 Network Monitor for Prometheus
--- Collects metrics from AE2 ME network and pushes to Prometheus Pushgateway
---
--- Requires config file at /etc/ae2-monitor.cfg:
---   pushgateway_url = "http://pushgateway-dev.apps.okd4.home.zoltanszepesi.com"
---   username = "pushuser"
---   password = "yourpassword"
---
--- Optional: track specific items in /etc/ae2-watchlist.cfg (one per line):
---   minecraft:iron_ingot
---   gregtech:gt.metaitem.01:32072
 
 local events = require('events')
 local component = require('component')
 local computer = require('computer')
 local event = require('event')
 
------------------------------------------------------------------------
--- Configuration
------------------------------------------------------------------------
-local CONFIG_PATH     = "/etc/ae2-monitor.cfg"
-local WATCHLIST_PATH  = "/etc/ae2-watchlist.cfg"
-local JOB_NAME        = "ae2_monitor"
-local INSTANCE        = "main"
-local PUSH_INTERVAL   = 30
-local ITEM_MIN_COUNT  = 1
+local CONFIG_PATH = "/etc/ae2-monitor.cfg"
+local JOB_NAME    = "ae2_monitor"
+local INSTANCE    = "main"
+local PUSH_INTERVAL = 30
 
 -----------------------------------------------------------------------
 local function copyIfMissing(target, example)
@@ -35,48 +20,22 @@ local function copyIfMissing(target, example)
     dst:write(src:read("*a"))
     src:close()
     dst:close()
-    print("Created " .. target .. " from example - please edit it")
 end
 
 local function loadConfig(path)
     copyIfMissing(path, path .. ".example")
     local f = io.open(path, "r")
-    if not f then
-        error("Config file not found: " .. path ..
-            "\nCreate it with: pushgateway_url, username, password")
-    end
+    if not f then error("Config not found: " .. path) end
     local cfg = {}
     for line in f:lines() do
-        local key, value = line:match('^%s*([%w_]+)%s*=%s*"(.-)"')
-        if key and value then
-            cfg[key] = value
-        end
+        local k, v = line:match('^%s*([%w_]+)%s*=%s*"(.-)"')
+        if k then cfg[k] = v end
     end
     f:close()
-    if not cfg.pushgateway_url then error("Config missing: pushgateway_url") end
-    if not cfg.username then error("Config missing: username") end
-    if not cfg.password then error("Config missing: password") end
+    if not cfg.pushgateway_url then error("Missing: pushgateway_url") end
+    if not cfg.username then error("Missing: username") end
+    if not cfg.password then error("Missing: password") end
     return cfg
-end
-
-local function loadWatchlist(path)
-    copyIfMissing(path, path .. ".example")
-    local list = {}
-    local f = io.open(path, "r")
-    if not f then return list end
-    for line in f:lines() do
-        line = line:match("^%s*(.-)%s*$")
-        if line ~= "" and line:sub(1, 1) ~= "#" then
-            local name, damage = line:match("^(.+):(%d+)$")
-            if name and damage then
-                list[#list + 1] = { name = name, damage = tonumber(damage) }
-            else
-                list[#list + 1] = { name = line }
-            end
-        end
-    end
-    f:close()
-    return list
 end
 
 local function base64encode(data)
@@ -97,12 +56,10 @@ end
 
 -----------------------------------------------------------------------
 local config = loadConfig(CONFIG_PATH)
-local watchlist = loadWatchlist(WATCHLIST_PATH)
 local authHeader = "Basic " .. base64encode(config.username .. ":" .. config.password)
 local me = component.me_interface
 local inet = component.internet
 local fmt = string.format
-
 local pushUrl = fmt("%s/metrics/job/%s/instance/%s",
     config.pushgateway_url, JOB_NAME, INSTANCE)
 local headers = {
@@ -116,8 +73,8 @@ local function sanitize(s)
 end
 
 local function safeCall(fn, ...)
-    local ok, result = pcall(fn, ...)
-    if ok then return result end
+    local ok, r = pcall(fn, ...)
+    if ok then return r end
     return nil
 end
 
@@ -126,26 +83,66 @@ local function push(body)
     local ok, err = pcall(function()
         handle = inet.request(pushUrl, body, headers)
         while true do
-            local result, reason = handle.finishConnect()
-            if result then break end
-            if result == nil then error(reason or "connection failed") end
+            local r, reason = handle.finishConnect()
+            if r then break end
+            if r == nil then error(reason or "conn failed") end
             os.sleep(0.05)
         end
         while handle.read(1024) do end
     end)
     if handle then pcall(handle.close) end
     if not ok then
-        io.stderr:write("Push failed: " .. tostring(err) .. "\n")
+        io.stderr:write("Push: " .. tostring(err) .. "\n")
     end
     return ok
 end
 
-local function buildMetrics()
+-- Yield multiple times to force incremental GC to free objects
+local function forceGC()
+    for i = 1, 20 do os.sleep(0) end
+end
+
+local function loop()
+    if events.needExit() then
+        print("received exit command")
+        return false
+    end
+
+    -- Aggressively yield to free previous cycle's garbage
+    forceGC()
+    print(fmt("[pre] free: %.0fK", computer.freeMemory() / 1024))
+
+    -- Phase 1: iterate allItems() → seen table (dedup) + totals
+    local seen = {}
+    local itemTypes = 0
+    local totalItems = 0
+    local ok = pcall(function()
+        for item in me.allItems() do
+            itemTypes = itemTypes + 1
+            local size = item.size or 0
+            totalItems = totalItems + size
+            if size >= 1 then
+                local key = (item.name or "") .. "|" .. (item.label or "") .. "|" .. (item.damage or 0)
+                seen[key] = (seen[key] or 0) + size
+            end
+        end
+    end)
+
+    if not ok then
+        seen = nil
+        io.stderr:write("allItems failed\n")
+        os.sleep(PUSH_INTERVAL)
+        return true
+    end
+
+    -- Free iterator proxy objects before building strings
+    forceGC()
+
+    -- Phase 2: build body from seen table + other metrics
     local lines = {}
     local n = 0
     local function add(s) n = n + 1 lines[n] = s end
 
-    -- Power metrics
     add("# HELP ae2_power_injection Average power injection (AE/t)")
     add("# TYPE ae2_power_injection gauge")
     add(fmt("ae2_power_injection %.2f", safeCall(me.getAvgPowerInjection) or 0))
@@ -159,40 +156,37 @@ local function buildMetrics()
     add("# TYPE ae2_power_max gauge")
     add(fmt("ae2_power_max %.2f", safeCall(me.getMaxStoredPower) or 0))
 
-    -- CPUs
+    add("# HELP ae2_item_types Total unique item types")
+    add("# TYPE ae2_item_types gauge")
+    add(fmt("ae2_item_types %d", itemTypes))
+    add("# HELP ae2_items_total Total items stored")
+    add("# TYPE ae2_items_total gauge")
+    add(fmt("ae2_items_total %.0f", totalItems))
+
+    add("# HELP ae2_item_count Items stored per type")
+    add("# TYPE ae2_item_count gauge")
+    for key, size in pairs(seen) do
+        local name, label, damage = key:match("^(.-)|(.-)|(.+)$")
+        add(fmt('ae2_item_count{name="%s",label="%s",damage="%s"} %.0f',
+            sanitize(name), sanitize(label), damage, size))
+    end
+    seen = nil
+
     local cpus = safeCall(me.getCpus)
     if cpus then
-        local cpuTotal, cpuBusy = 0, 0
+        local t, b = 0, 0
         for _, cpu in ipairs(cpus) do
-            cpuTotal = cpuTotal + 1
-            if cpu.busy then cpuBusy = cpuBusy + 1 end
+            t = t + 1
+            if cpu.busy then b = b + 1 end
         end
         add("# HELP ae2_cpus_total Total crafting CPUs")
         add("# TYPE ae2_cpus_total gauge")
-        add(fmt("ae2_cpus_total %d", cpuTotal))
+        add(fmt("ae2_cpus_total %d", t))
         add("# HELP ae2_cpus_busy Busy crafting CPUs")
         add("# TYPE ae2_cpus_busy gauge")
-        add(fmt("ae2_cpus_busy %d", cpuBusy))
+        add(fmt("ae2_cpus_busy %d", b))
     end
 
-    -- Watchlist items (targeted queries, one at a time)
-    if #watchlist > 0 then
-        add("# HELP ae2_watched_item_count Watched item count")
-        add("# TYPE ae2_watched_item_count gauge")
-        for _, entry in ipairs(watchlist) do
-            local filter = { name = entry.name }
-            if entry.damage then filter.damage = entry.damage end
-            local items = safeCall(me.getItemsInNetwork, filter)
-            if items then
-                for _, item in ipairs(items) do
-                    add(fmt('ae2_watched_item_count{name="%s",label="%s",damage="%d"} %.0f',
-                        sanitize(item.name), sanitize(item.label), item.damage or 0, item.size or 0))
-                end
-            end
-        end
-    end
-
-    -- Fluids
     local fluids = safeCall(me.getFluidsInNetwork)
     if fluids then
         add("# HELP ae2_fluid_amount Fluid stored (mB)")
@@ -203,28 +197,17 @@ local function buildMetrics()
         end
     end
 
-    return table.concat(lines, "\n") .. "\n"
-end
+    -- Free seen before concat
+    forceGC()
 
-local function loop()
-    if events.needExit() then
-        print("received exit command")
-        return false
-    end
+    local body = table.concat(lines, "\n") .. "\n"
+    lines = nil
+    local size = #body
+    local pushed = push(body)
+    body = nil
 
-    os.sleep(0)
-
-    local ok, body = pcall(buildMetrics)
-    if ok then
-        local size = #body
-        local pushed = push(body)
-        body = nil
-        if pushed then
-            print(fmt("pushed %dB [free: %.0fK]", size,
-                computer.freeMemory() / 1024))
-        end
-    else
-        io.stderr:write("Collect failed: " .. tostring(body) .. "\n")
+    if pushed then
+        print(fmt("pushed %dB [free: %.0fK]", size, computer.freeMemory() / 1024))
     end
 
     os.sleep(PUSH_INTERVAL)
@@ -233,10 +216,7 @@ end
 
 local function main()
     print("AE2 Monitor starting")
-    print("Pushgateway: " .. config.pushgateway_url)
-    print("Interval: " .. PUSH_INTERVAL .. "s")
-    print(fmt("Watching %d items [free: %.0fK]",
-        #watchlist, computer.freeMemory() / 1024))
+    print(fmt("Free: %.0fK", computer.freeMemory() / 1024))
     print("Press 'q' to exit")
 
     events.initEvents()
