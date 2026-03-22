@@ -33,7 +33,7 @@ local function loadConfig(path)
     end
     local cfg = {}
     for line in f:lines() do
-        local key, value = line:match('^%s*(%w+)%s*=%s*"(.-)"')
+        local key, value = line:match('^%s*([%w_]+)%s*=%s*"(.-)"')
         if key and value then
             cfg[key] = value
         end
