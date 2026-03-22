@@ -159,25 +159,6 @@ local function buildMetrics()
     add("# TYPE ae2_power_max gauge")
     add(fmt("ae2_power_max %.2f", safeCall(me.getMaxStoredPower) or 0))
 
-    -- Item totals via allItems() - counting only, no strings per item
-    local itemTypes = 0
-    local totalItems = 0
-    local iter = safeCall(me.allItems)
-    if iter then
-        for item in iter do
-            itemTypes = itemTypes + 1
-            totalItems = totalItems + (item.size or 0)
-        end
-    end
-    iter = nil
-
-    add("# HELP ae2_item_types Total unique item types")
-    add("# TYPE ae2_item_types gauge")
-    add(fmt("ae2_item_types %d", itemTypes))
-    add("# HELP ae2_items_total Total items stored")
-    add("# TYPE ae2_items_total gauge")
-    add(fmt("ae2_items_total %.0f", totalItems))
-
     -- CPUs
     local cpus = safeCall(me.getCpus)
     if cpus then
