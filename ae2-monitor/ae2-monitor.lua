@@ -21,6 +21,7 @@ local PUSH_INTERVAL   = 30    -- seconds between metric pushes
 local ITEM_MIN_COUNT  = 1     -- only report items with at least this many stored
 local TRACK_FLUIDS    = true
 local TRACK_ESSENTIA  = true
+local METRICS_FILE    = "/tmp/ae2_metrics.txt"
 
 -----------------------------------------------------------------------
 -- Load config from file
@@ -67,57 +68,58 @@ end
 local config = loadConfig(CONFIG_PATH)
 local authHeader = "Basic " .. base64encode(config.username .. ":" .. config.password)
 local me = component.me_interface
+local fmt = string.format
 
 local function sanitize(s)
     if not s then return "" end
     return s:gsub('\\', '\\\\'):gsub('"', '\\"'):gsub('\n', '\\n')
 end
 
-local function collectMetrics()
-    local lines = {}
-    local function add(s) lines[#lines + 1] = s end
-    local fmt = string.format
+-- Write metrics to a temp file line-by-line to avoid accumulating
+-- all strings in memory (768K RAM is tight with 1000+ item types)
+local function collectMetricsToFile()
+    local f = io.open(METRICS_FILE, "w")
 
     -- Power metrics
-    add("# HELP ae2_power_injection Average power injection (AE/t)")
-    add("# TYPE ae2_power_injection gauge")
-    add(fmt("ae2_power_injection %.2f", me.getAvgPowerInjection()))
+    f:write("# HELP ae2_power_injection Average power injection (AE/t)\n")
+    f:write("# TYPE ae2_power_injection gauge\n")
+    f:write(fmt("ae2_power_injection %.2f\n", me.getAvgPowerInjection()))
 
-    add("# HELP ae2_power_usage Average power usage (AE/t)")
-    add("# TYPE ae2_power_usage gauge")
-    add(fmt("ae2_power_usage %.2f", me.getAvgPowerUsage()))
+    f:write("# HELP ae2_power_usage Average power usage (AE/t)\n")
+    f:write("# TYPE ae2_power_usage gauge\n")
+    f:write(fmt("ae2_power_usage %.2f\n", me.getAvgPowerUsage()))
 
-    add("# HELP ae2_power_stored Stored power (AE)")
-    add("# TYPE ae2_power_stored gauge")
-    add(fmt("ae2_power_stored %.2f", me.getStoredPower()))
+    f:write("# HELP ae2_power_stored Stored power (AE)\n")
+    f:write("# TYPE ae2_power_stored gauge\n")
+    f:write(fmt("ae2_power_stored %.2f\n", me.getStoredPower()))
 
-    add("# HELP ae2_power_max Maximum power capacity (AE)")
-    add("# TYPE ae2_power_max gauge")
-    add(fmt("ae2_power_max %.2f", me.getMaxStoredPower()))
+    f:write("# HELP ae2_power_max Maximum power capacity (AE)\n")
+    f:write("# TYPE ae2_power_max gauge\n")
+    f:write(fmt("ae2_power_max %.2f\n", me.getMaxStoredPower()))
 
     -- Item metrics
     local itemTypes = 0
     local totalItems = 0
 
-    add("# HELP ae2_item_count Items stored per type")
-    add("# TYPE ae2_item_count gauge")
+    f:write("# HELP ae2_item_count Items stored per type\n")
+    f:write("# TYPE ae2_item_count gauge\n")
 
     for item in me.allItems() do
         itemTypes = itemTypes + 1
         totalItems = totalItems + item.size
         if item.size >= ITEM_MIN_COUNT then
-            add(fmt('ae2_item_count{name="%s",label="%s",damage="%d"} %.0f',
+            f:write(fmt('ae2_item_count{name="%s",label="%s",damage="%d"} %.0f\n',
                 sanitize(item.name), sanitize(item.label), item.damage, item.size))
         end
     end
 
-    add("# HELP ae2_item_types Total unique item types")
-    add("# TYPE ae2_item_types gauge")
-    add(fmt("ae2_item_types %d", itemTypes))
+    f:write("# HELP ae2_item_types Total unique item types\n")
+    f:write("# TYPE ae2_item_types gauge\n")
+    f:write(fmt("ae2_item_types %d\n", itemTypes))
 
-    add("# HELP ae2_items_total Total items stored")
-    add("# TYPE ae2_items_total gauge")
-    add(fmt("ae2_items_total %.0f", totalItems))
+    f:write("# HELP ae2_items_total Total items stored\n")
+    f:write("# TYPE ae2_items_total gauge\n")
+    f:write(fmt("ae2_items_total %.0f\n", totalItems))
 
     -- Crafting CPU metrics
     local cpus = me.getCpus()
@@ -128,30 +130,30 @@ local function collectMetrics()
         if cpu.busy then cpuBusy = cpuBusy + 1 end
     end
 
-    add("# HELP ae2_cpus_total Total crafting CPUs")
-    add("# TYPE ae2_cpus_total gauge")
-    add(fmt("ae2_cpus_total %d", cpuTotal))
+    f:write("# HELP ae2_cpus_total Total crafting CPUs\n")
+    f:write("# TYPE ae2_cpus_total gauge\n")
+    f:write(fmt("ae2_cpus_total %d\n", cpuTotal))
 
-    add("# HELP ae2_cpus_busy Busy crafting CPUs")
-    add("# TYPE ae2_cpus_busy gauge")
-    add(fmt("ae2_cpus_busy %d", cpuBusy))
+    f:write("# HELP ae2_cpus_busy Busy crafting CPUs\n")
+    f:write("# TYPE ae2_cpus_busy gauge\n")
+    f:write(fmt("ae2_cpus_busy %d\n", cpuBusy))
 
     -- Fluid metrics
     if TRACK_FLUIDS then
         local ok, fluids = pcall(me.getFluidsInNetwork)
         if ok and fluids then
             local fluidTypes = 0
-            add("# HELP ae2_fluid_amount Fluid stored (mB)")
-            add("# TYPE ae2_fluid_amount gauge")
+            f:write("# HELP ae2_fluid_amount Fluid stored (mB)\n")
+            f:write("# TYPE ae2_fluid_amount gauge\n")
             for _, fluid in ipairs(fluids) do
                 fluidTypes = fluidTypes + 1
                 local amount = fluid.amount or fluid.size or 0
-                add(fmt('ae2_fluid_amount{name="%s",label="%s"} %.0f',
+                f:write(fmt('ae2_fluid_amount{name="%s",label="%s"} %.0f\n',
                     sanitize(fluid.name), sanitize(fluid.label), amount))
             end
-            add("# HELP ae2_fluid_types Total fluid types")
-            add("# TYPE ae2_fluid_types gauge")
-            add(fmt("ae2_fluid_types %d", fluidTypes))
+            f:write("# HELP ae2_fluid_types Total fluid types\n")
+            f:write("# TYPE ae2_fluid_types gauge\n")
+            f:write(fmt("ae2_fluid_types %d\n", fluidTypes))
         end
     end
 
@@ -160,25 +162,25 @@ local function collectMetrics()
         local ok, essentia = pcall(me.getEssentiaInNetwork)
         if ok and essentia then
             local essTypes = 0
-            add("# HELP ae2_essentia_amount Essentia stored")
-            add("# TYPE ae2_essentia_amount gauge")
+            f:write("# HELP ae2_essentia_amount Essentia stored\n")
+            f:write("# TYPE ae2_essentia_amount gauge\n")
             for _, ess in ipairs(essentia) do
                 essTypes = essTypes + 1
                 local amount = ess.amount or ess.size or 0
-                add(fmt('ae2_essentia_amount{name="%s",label="%s"} %.0f',
+                f:write(fmt('ae2_essentia_amount{name="%s",label="%s"} %.0f\n',
                     sanitize(ess.name or ""), sanitize(ess.label or ""), amount))
             end
-            add("# HELP ae2_essentia_types Total essentia types")
-            add("# TYPE ae2_essentia_types gauge")
-            add(fmt("ae2_essentia_types %d", essTypes))
+            f:write("# HELP ae2_essentia_types Total essentia types\n")
+            f:write("# TYPE ae2_essentia_types gauge\n")
+            f:write(fmt("ae2_essentia_types %d\n", essTypes))
         end
     end
 
-    return table.concat(lines, "\n") .. "\n"
+    f:close()
 end
 
 local function pushMetrics(body)
-    local url = string.format("%s/metrics/job/%s/instance/%s",
+    local url = fmt("%s/metrics/job/%s/instance/%s",
         config.pushgateway_url, JOB_NAME, INSTANCE)
     local ok, err = pcall(function()
         for _ in internet.request(url, body, {
@@ -198,14 +200,30 @@ local function loop()
         return false
     end
 
-    local ok, body = pcall(collectMetrics)
-    if ok then
-        local pushed = pushMetrics(body)
-        if pushed then
-            print(string.format("pushed metrics (%d bytes)", #body))
-        end
-    else
-        io.stderr:write("Collect failed: " .. tostring(body) .. "\n")
+    collectgarbage("collect")
+
+    local ok, err = pcall(collectMetricsToFile)
+    if not ok then
+        io.stderr:write("Collect failed: " .. tostring(err) .. "\n")
+        os.sleep(PUSH_INTERVAL)
+        return true
+    end
+
+    -- Free iterator/temp objects before reading file
+    collectgarbage("collect")
+
+    -- Read metrics file and push
+    local f = io.open(METRICS_FILE, "r")
+    local body = f:read("*a")
+    f:close()
+
+    local pushed = pushMetrics(body)
+    local size = #body
+    body = nil
+    collectgarbage("collect")
+
+    if pushed then
+        print(fmt("pushed metrics (%d bytes)", size))
     end
 
     os.sleep(PUSH_INTERVAL)
@@ -224,6 +242,7 @@ local function main()
     while loop() do end
 
     events.unhookEvents()
+    os.remove(METRICS_FILE)
     print("AE2 Monitor stopped")
 end
 
