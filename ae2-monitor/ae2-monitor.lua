@@ -116,13 +116,13 @@ local function collectMetricsToFile()
     f:write("# TYPE ae2_power_max gauge\n")
     f:write(fmt("ae2_power_max %.2f\n", safeCall(me.getMaxStoredPower) or 0))
 
-    -- Item metrics - write each item directly to file
+    -- Item metrics - deduplicate by {name, label, damage} to avoid
+    -- pushgateway rejecting duplicate label sets (e.g. items with
+    -- different NBT but same name/label/damage like enchanted items)
     local itemTypes = 0
     local totalItems = 0
+    local seen = {}
     local iter = safeCall(me.allItems)
-
-    f:write("# HELP ae2_item_count Items stored per type\n")
-    f:write("# TYPE ae2_item_count gauge\n")
 
     if iter then
         for item in iter do
@@ -130,11 +130,23 @@ local function collectMetricsToFile()
             local size = item.size or 0
             totalItems = totalItems + size
             if size >= ITEM_MIN_COUNT then
-                f:write(fmt('ae2_item_count{name="%s",label="%s",damage="%d"} %.0f\n',
-                    sanitize(item.name), sanitize(item.label), item.damage or 0, size))
+                local key = (item.name or "") .. "|" .. (item.label or "") .. "|" .. (item.damage or 0)
+                seen[key] = (seen[key] or 0) + size
             end
         end
     end
+
+    os.sleep(0) -- yield after iterator to let GC free proxy objects
+
+    f:write("# HELP ae2_item_count Items stored per type\n")
+    f:write("# TYPE ae2_item_count gauge\n")
+
+    for key, size in pairs(seen) do
+        local name, label, damage = key:match("^(.-)|(.-)|(.+)$")
+        f:write(fmt('ae2_item_count{name="%s",label="%s",damage="%s"} %.0f\n',
+            sanitize(name), sanitize(label), damage, size))
+    end
+    seen = nil
 
     f:write("# HELP ae2_item_types Total unique item types\n")
     f:write("# TYPE ae2_item_types gauge\n")
