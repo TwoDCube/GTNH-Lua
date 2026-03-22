@@ -234,7 +234,7 @@ local function loop()
         result = nil
         os.sleep(0) -- yield to free body string
         if pushed then
-            print(fmt("pushed %dB [free: %dK]", size,
+            print(fmt("pushed %dB [free: %.0fK]", size,
                 computer.freeMemory() / 1024))
         end
     else
