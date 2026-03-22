@@ -8,8 +8,8 @@
 
 local events = require('events')
 local component = require('component')
+local computer = require('computer')
 local event = require('event')
-local internet = require('internet')
 
 -----------------------------------------------------------------------
 -- Configuration
@@ -18,8 +18,7 @@ local CONFIG_PATH     = "/etc/ae2-monitor.cfg"
 local JOB_NAME        = "ae2_monitor"
 local INSTANCE        = "main"
 local PUSH_INTERVAL   = 30
-local ITEM_MIN_COUNT  = 1     -- only report items with at least this many stored
-local METRICS_FILE    = "/tmp/ae2_metrics.txt"
+local ITEM_MIN_COUNT  = 1
 
 -----------------------------------------------------------------------
 -- Load config from file
@@ -80,45 +79,44 @@ local config = loadConfig(CONFIG_PATH)
 local authHeader = "Basic " .. base64encode(config.username .. ":" .. config.password)
 local me = component.me_interface
 local fmt = string.format
+local pushUrl = fmt("%s/metrics/job/%s/instance/%s",
+    config.pushgateway_url, JOB_NAME, INSTANCE)
+local headers = {
+    ["Content-Type"] = "text/plain; version=0.0.4",
+    ["Authorization"] = authHeader,
+}
 
 local function sanitize(s)
     if not s then return "" end
     return s:gsub('\\', '\\\\'):gsub('"', '\\"'):gsub('\n', '\\n')
 end
 
--- Safe wrapper: returns nil if the ME call fails
 local function safeCall(fn, ...)
     local ok, result = pcall(fn, ...)
     if ok then return result end
     return nil
 end
 
--- Write all metrics to a temp file line-by-line.
--- This avoids accumulating strings in memory (768K RAM is tight).
-local function collectMetricsToFile()
-    local f = io.open(METRICS_FILE, "w")
-    if not f then error("Cannot open " .. METRICS_FILE) end
+local function buildMetrics()
+    local lines = {}
+    local n = 0
+    local function add(s) n = n + 1 lines[n] = s end
 
     -- Power metrics
-    f:write(fmt("# HELP ae2_power_injection Average power injection (AE/t)\n"))
-    f:write(fmt("# TYPE ae2_power_injection gauge\n"))
-    f:write(fmt("ae2_power_injection %.2f\n", safeCall(me.getAvgPowerInjection) or 0))
+    add("# HELP ae2_power_injection Average power injection (AE/t)")
+    add("# TYPE ae2_power_injection gauge")
+    add(fmt("ae2_power_injection %.2f", safeCall(me.getAvgPowerInjection) or 0))
+    add("# HELP ae2_power_usage Average power usage (AE/t)")
+    add("# TYPE ae2_power_usage gauge")
+    add(fmt("ae2_power_usage %.2f", safeCall(me.getAvgPowerUsage) or 0))
+    add("# HELP ae2_power_stored Stored power (AE)")
+    add("# TYPE ae2_power_stored gauge")
+    add(fmt("ae2_power_stored %.2f", safeCall(me.getStoredPower) or 0))
+    add("# HELP ae2_power_max Maximum power capacity (AE)")
+    add("# TYPE ae2_power_max gauge")
+    add(fmt("ae2_power_max %.2f", safeCall(me.getMaxStoredPower) or 0))
 
-    f:write("# HELP ae2_power_usage Average power usage (AE/t)\n")
-    f:write("# TYPE ae2_power_usage gauge\n")
-    f:write(fmt("ae2_power_usage %.2f\n", safeCall(me.getAvgPowerUsage) or 0))
-
-    f:write("# HELP ae2_power_stored Stored power (AE)\n")
-    f:write("# TYPE ae2_power_stored gauge\n")
-    f:write(fmt("ae2_power_stored %.2f\n", safeCall(me.getStoredPower) or 0))
-
-    f:write("# HELP ae2_power_max Maximum power capacity (AE)\n")
-    f:write("# TYPE ae2_power_max gauge\n")
-    f:write(fmt("ae2_power_max %.2f\n", safeCall(me.getMaxStoredPower) or 0))
-
-    -- Item metrics - deduplicate by {name, label, damage} to avoid
-    -- pushgateway rejecting duplicate label sets (e.g. items with
-    -- different NBT but same name/label/damage like enchanted items)
+    -- Items: collect into dedup table, then yield, then format
     local itemTypes = 0
     local totalItems = 0
     local seen = {}
@@ -136,27 +134,26 @@ local function collectMetricsToFile()
         end
     end
 
-    os.sleep(0) -- yield after iterator to let GC free proxy objects
+    -- Yield after iterator to free proxy objects before building strings
+    os.sleep(0)
 
-    f:write("# HELP ae2_item_count Items stored per type\n")
-    f:write("# TYPE ae2_item_count gauge\n")
-
+    add("# HELP ae2_item_count Items stored per type")
+    add("# TYPE ae2_item_count gauge")
     for key, size in pairs(seen) do
         local name, label, damage = key:match("^(.-)|(.-)|(.+)$")
-        f:write(fmt('ae2_item_count{name="%s",label="%s",damage="%s"} %.0f\n',
+        add(fmt('ae2_item_count{name="%s",label="%s",damage="%s"} %.0f',
             sanitize(name), sanitize(label), damage, size))
     end
     seen = nil
 
-    f:write("# HELP ae2_item_types Total unique item types\n")
-    f:write("# TYPE ae2_item_types gauge\n")
-    f:write(fmt("ae2_item_types %d\n", itemTypes))
+    add("# HELP ae2_item_types Total unique item types")
+    add("# TYPE ae2_item_types gauge")
+    add(fmt("ae2_item_types %d", itemTypes))
+    add("# HELP ae2_items_total Total items stored")
+    add("# TYPE ae2_items_total gauge")
+    add(fmt("ae2_items_total %.0f", totalItems))
 
-    f:write("# HELP ae2_items_total Total items stored\n")
-    f:write("# TYPE ae2_items_total gauge\n")
-    f:write(fmt("ae2_items_total %.0f\n", totalItems))
-
-    -- Crafting CPU metrics
+    -- CPUs
     local cpus = safeCall(me.getCpus)
     local cpuTotal = 0
     local cpuBusy = 0
@@ -166,44 +163,56 @@ local function collectMetricsToFile()
             if cpu.busy then cpuBusy = cpuBusy + 1 end
         end
     end
+    add("# HELP ae2_cpus_total Total crafting CPUs")
+    add("# TYPE ae2_cpus_total gauge")
+    add(fmt("ae2_cpus_total %d", cpuTotal))
+    add("# HELP ae2_cpus_busy Busy crafting CPUs")
+    add("# TYPE ae2_cpus_busy gauge")
+    add(fmt("ae2_cpus_busy %d", cpuBusy))
 
-    f:write("# HELP ae2_cpus_total Total crafting CPUs\n")
-    f:write("# TYPE ae2_cpus_total gauge\n")
-    f:write(fmt("ae2_cpus_total %d\n", cpuTotal))
-
-    f:write("# HELP ae2_cpus_busy Busy crafting CPUs\n")
-    f:write("# TYPE ae2_cpus_busy gauge\n")
-    f:write(fmt("ae2_cpus_busy %d\n", cpuBusy))
-
-    -- Fluid metrics
+    -- Fluids
     local fluids = safeCall(me.getFluidsInNetwork)
     if fluids then
         local fluidTypes = 0
-        f:write("# HELP ae2_fluid_amount Fluid stored (mB)\n")
-        f:write("# TYPE ae2_fluid_amount gauge\n")
+        add("# HELP ae2_fluid_amount Fluid stored (mB)")
+        add("# TYPE ae2_fluid_amount gauge")
         for _, fluid in ipairs(fluids) do
             fluidTypes = fluidTypes + 1
             local amount = fluid.amount or fluid.size or 0
-            f:write(fmt('ae2_fluid_amount{name="%s",label="%s"} %.0f\n',
+            add(fmt('ae2_fluid_amount{name="%s",label="%s"} %.0f',
                 sanitize(fluid.name), sanitize(fluid.label), amount))
         end
-        f:write("# HELP ae2_fluid_types Total fluid types\n")
-        f:write("# TYPE ae2_fluid_types gauge\n")
-        f:write(fmt("ae2_fluid_types %d\n", fluidTypes))
+        add("# HELP ae2_fluid_types Total fluid types")
+        add("# TYPE ae2_fluid_types gauge")
+        add(fmt("ae2_fluid_types %d", fluidTypes))
     end
 
-    f:close()
+    local body = table.concat(lines, "\n") .. "\n"
+    lines = nil
+    return body
 end
 
+-- Use raw component.internet with explicit close() to prevent handle leaks
+local inet = component.internet
+
 local function pushMetrics(body)
-    local url = fmt("%s/metrics/job/%s/instance/%s",
-        config.pushgateway_url, JOB_NAME, INSTANCE)
+    local handle
     local ok, err = pcall(function()
-        for _ in internet.request(url, body, {
-            ["Content-Type"] = "text/plain; version=0.0.4",
-            ["Authorization"] = authHeader,
-        }) do end
+        handle = inet.request(pushUrl, body, headers)
+        -- Wait for connection
+        while true do
+            local result, reason = handle.finishConnect()
+            if result then break end
+            if result == nil then error(reason or "connection failed") end
+            os.sleep(0.05)
+        end
+        -- Drain response
+        while handle.read(1024) do end
     end)
+    -- Always close the handle
+    if handle then
+        pcall(handle.close)
+    end
     if not ok then
         io.stderr:write("Push failed: " .. tostring(err) .. "\n")
     end
@@ -216,28 +225,20 @@ local function loop()
         return false
     end
 
-    -- Phase 1: collect metrics to file (frees each string after write)
-    local ok, err = pcall(collectMetricsToFile)
-    if not ok then
-        io.stderr:write("Collect failed: " .. tostring(err) .. "\n")
-        os.sleep(PUSH_INTERVAL)
-        return true
-    end
+    os.sleep(0) -- yield to allow GC before collection
 
-    -- Yield to let GC free iterator objects before reading file
-    os.sleep(0)
-
-    -- Phase 2: read file and push
-    local f = io.open(METRICS_FILE, "r")
-    if f then
-        local body = f:read("*a")
-        f:close()
-        local size = #body
-        local pushed = pushMetrics(body)
-        body = nil
+    local ok, result = pcall(buildMetrics)
+    if ok then
+        local size = #result
+        local pushed = pushMetrics(result)
+        result = nil
+        os.sleep(0) -- yield to free body string
         if pushed then
-            print(fmt("pushed metrics (%d bytes)", size))
+            print(fmt("pushed %dB [free: %dK]", size,
+                computer.freeMemory() / 1024))
         end
+    else
+        io.stderr:write("Collect failed: " .. tostring(result) .. "\n")
     end
 
     os.sleep(PUSH_INTERVAL)
@@ -256,7 +257,6 @@ local function main()
     while loop() do end
 
     events.unhookEvents()
-    os.remove(METRICS_FILE)
     print("AE2 Monitor stopped")
 end
 
