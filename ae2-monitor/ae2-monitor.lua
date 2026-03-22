@@ -5,6 +5,10 @@
 --   pushgateway_url = "http://pushgateway-dev.apps.okd4.home.zoltanszepesi.com"
 --   username = "pushuser"
 --   password = "yourpassword"
+--
+-- Optional: track specific items in /etc/ae2-watchlist.cfg (one per line):
+--   minecraft:iron_ingot
+--   gregtech:gt.metaitem.01:32072
 
 local events = require('events')
 local component = require('component')
@@ -15,13 +19,10 @@ local internet = require('internet')
 -- Configuration
 -----------------------------------------------------------------------
 local CONFIG_PATH     = "/etc/ae2-monitor.cfg"
+local WATCHLIST_PATH  = "/etc/ae2-watchlist.cfg"
 local JOB_NAME        = "ae2_monitor"
 local INSTANCE        = "main"
-local PUSH_INTERVAL   = 30    -- seconds between metric pushes
-local ITEM_MIN_COUNT  = 1     -- only report items with at least this many stored
-local TRACK_FLUIDS    = true
-local TRACK_ESSENTIA  = true
-local METRICS_FILE    = "/tmp/ae2_metrics.txt"
+local PUSH_INTERVAL   = 30
 
 -----------------------------------------------------------------------
 -- Load config from file
@@ -48,6 +49,26 @@ local function loadConfig(path)
     return cfg
 end
 
+local function loadWatchlist(path)
+    local list = {}
+    local f = io.open(path, "r")
+    if not f then return list end
+    for line in f:lines() do
+        line = line:match("^%s*(.-)%s*$") -- trim
+        if line ~= "" and line:sub(1, 1) ~= "#" then
+            -- Parse "name" or "name:damage"
+            local name, damage = line:match("^(.+):(%d+)$")
+            if name and damage then
+                list[#list + 1] = { name = name, damage = tonumber(damage) }
+            else
+                list[#list + 1] = { name = line }
+            end
+        end
+    end
+    f:close()
+    return list
+end
+
 local function base64encode(data)
     local b = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'
     return ((data:gsub('.', function(x)
@@ -66,6 +87,7 @@ end
 
 -----------------------------------------------------------------------
 local config = loadConfig(CONFIG_PATH)
+local watchlist = loadWatchlist(WATCHLIST_PATH)
 local authHeader = "Basic " .. base64encode(config.username .. ":" .. config.password)
 local me = component.me_interface
 local fmt = string.format
@@ -75,51 +97,42 @@ local function sanitize(s)
     return s:gsub('\\', '\\\\'):gsub('"', '\\"'):gsub('\n', '\\n')
 end
 
--- Write metrics to a temp file line-by-line to avoid accumulating
--- all strings in memory (768K RAM is tight with 1000+ item types)
-local function collectMetricsToFile()
-    local f = io.open(METRICS_FILE, "w")
+local function buildMetrics()
+    local lines = {}
+    local function add(s) lines[#lines + 1] = s end
 
     -- Power metrics
-    f:write("# HELP ae2_power_injection Average power injection (AE/t)\n")
-    f:write("# TYPE ae2_power_injection gauge\n")
-    f:write(fmt("ae2_power_injection %.2f\n", me.getAvgPowerInjection()))
+    add("# HELP ae2_power_injection Average power injection (AE/t)")
+    add("# TYPE ae2_power_injection gauge")
+    add(fmt("ae2_power_injection %.2f", me.getAvgPowerInjection()))
 
-    f:write("# HELP ae2_power_usage Average power usage (AE/t)\n")
-    f:write("# TYPE ae2_power_usage gauge\n")
-    f:write(fmt("ae2_power_usage %.2f\n", me.getAvgPowerUsage()))
+    add("# HELP ae2_power_usage Average power usage (AE/t)")
+    add("# TYPE ae2_power_usage gauge")
+    add(fmt("ae2_power_usage %.2f", me.getAvgPowerUsage()))
 
-    f:write("# HELP ae2_power_stored Stored power (AE)\n")
-    f:write("# TYPE ae2_power_stored gauge\n")
-    f:write(fmt("ae2_power_stored %.2f\n", me.getStoredPower()))
+    add("# HELP ae2_power_stored Stored power (AE)")
+    add("# TYPE ae2_power_stored gauge")
+    add(fmt("ae2_power_stored %.2f", me.getStoredPower()))
 
-    f:write("# HELP ae2_power_max Maximum power capacity (AE)\n")
-    f:write("# TYPE ae2_power_max gauge\n")
-    f:write(fmt("ae2_power_max %.2f\n", me.getMaxStoredPower()))
+    add("# HELP ae2_power_max Maximum power capacity (AE)")
+    add("# TYPE ae2_power_max gauge")
+    add(fmt("ae2_power_max %.2f", me.getMaxStoredPower()))
 
-    -- Item metrics
+    -- Item totals via allItems() - only count, no per-item strings
     local itemTypes = 0
     local totalItems = 0
-
-    f:write("# HELP ae2_item_count Items stored per type\n")
-    f:write("# TYPE ae2_item_count gauge\n")
-
     for item in me.allItems() do
         itemTypes = itemTypes + 1
         totalItems = totalItems + item.size
-        if item.size >= ITEM_MIN_COUNT then
-            f:write(fmt('ae2_item_count{name="%s",label="%s",damage="%d"} %.0f\n',
-                sanitize(item.name), sanitize(item.label), item.damage, item.size))
-        end
     end
 
-    f:write("# HELP ae2_item_types Total unique item types\n")
-    f:write("# TYPE ae2_item_types gauge\n")
-    f:write(fmt("ae2_item_types %d\n", itemTypes))
+    add("# HELP ae2_item_types Total unique item types")
+    add("# TYPE ae2_item_types gauge")
+    add(fmt("ae2_item_types %d", itemTypes))
 
-    f:write("# HELP ae2_items_total Total items stored\n")
-    f:write("# TYPE ae2_items_total gauge\n")
-    f:write(fmt("ae2_items_total %.0f\n", totalItems))
+    add("# HELP ae2_items_total Total items stored")
+    add("# TYPE ae2_items_total gauge")
+    add(fmt("ae2_items_total %.0f", totalItems))
 
     -- Crafting CPU metrics
     local cpus = me.getCpus()
@@ -130,53 +143,49 @@ local function collectMetricsToFile()
         if cpu.busy then cpuBusy = cpuBusy + 1 end
     end
 
-    f:write("# HELP ae2_cpus_total Total crafting CPUs\n")
-    f:write("# TYPE ae2_cpus_total gauge\n")
-    f:write(fmt("ae2_cpus_total %d\n", cpuTotal))
+    add("# HELP ae2_cpus_total Total crafting CPUs")
+    add("# TYPE ae2_cpus_total gauge")
+    add(fmt("ae2_cpus_total %d", cpuTotal))
 
-    f:write("# HELP ae2_cpus_busy Busy crafting CPUs\n")
-    f:write("# TYPE ae2_cpus_busy gauge\n")
-    f:write(fmt("ae2_cpus_busy %d\n", cpuBusy))
+    add("# HELP ae2_cpus_busy Busy crafting CPUs")
+    add("# TYPE ae2_cpus_busy gauge")
+    add(fmt("ae2_cpus_busy %d", cpuBusy))
 
-    -- Fluid metrics
-    if TRACK_FLUIDS then
-        local ok, fluids = pcall(me.getFluidsInNetwork)
-        if ok and fluids then
-            local fluidTypes = 0
-            f:write("# HELP ae2_fluid_amount Fluid stored (mB)\n")
-            f:write("# TYPE ae2_fluid_amount gauge\n")
-            for _, fluid in ipairs(fluids) do
-                fluidTypes = fluidTypes + 1
-                local amount = fluid.amount or fluid.size or 0
-                f:write(fmt('ae2_fluid_amount{name="%s",label="%s"} %.0f\n',
-                    sanitize(fluid.name), sanitize(fluid.label), amount))
+    -- Watchlist items (targeted queries, memory-efficient)
+    if #watchlist > 0 then
+        add("# HELP ae2_watched_item_count Watched item count")
+        add("# TYPE ae2_watched_item_count gauge")
+        for _, entry in ipairs(watchlist) do
+            local filter = { name = entry.name }
+            if entry.damage then filter.damage = entry.damage end
+            local ok, items = pcall(me.getItemsInNetwork, filter)
+            if ok and items then
+                for _, item in ipairs(items) do
+                    add(fmt('ae2_watched_item_count{name="%s",label="%s",damage="%d"} %.0f',
+                        sanitize(item.name), sanitize(item.label), item.damage or 0, item.size))
+                end
             end
-            f:write("# HELP ae2_fluid_types Total fluid types\n")
-            f:write("# TYPE ae2_fluid_types gauge\n")
-            f:write(fmt("ae2_fluid_types %d\n", fluidTypes))
         end
     end
 
-    -- Essentia metrics
-    if TRACK_ESSENTIA then
-        local ok, essentia = pcall(me.getEssentiaInNetwork)
-        if ok and essentia then
-            local essTypes = 0
-            f:write("# HELP ae2_essentia_amount Essentia stored\n")
-            f:write("# TYPE ae2_essentia_amount gauge\n")
-            for _, ess in ipairs(essentia) do
-                essTypes = essTypes + 1
-                local amount = ess.amount or ess.size or 0
-                f:write(fmt('ae2_essentia_amount{name="%s",label="%s"} %.0f\n',
-                    sanitize(ess.name or ""), sanitize(ess.label or ""), amount))
-            end
-            f:write("# HELP ae2_essentia_types Total essentia types\n")
-            f:write("# TYPE ae2_essentia_types gauge\n")
-            f:write(fmt("ae2_essentia_types %d\n", essTypes))
+    -- Fluids
+    local ok, fluids = pcall(me.getFluidsInNetwork)
+    if ok and fluids then
+        local fluidTypes = 0
+        add("# HELP ae2_fluid_amount Fluid stored (mB)")
+        add("# TYPE ae2_fluid_amount gauge")
+        for _, fluid in ipairs(fluids) do
+            fluidTypes = fluidTypes + 1
+            local amount = fluid.amount or fluid.size or 0
+            add(fmt('ae2_fluid_amount{name="%s",label="%s"} %.0f',
+                sanitize(fluid.name), sanitize(fluid.label), amount))
         end
+        add("# HELP ae2_fluid_types Total fluid types")
+        add("# TYPE ae2_fluid_types gauge")
+        add(fmt("ae2_fluid_types %d", fluidTypes))
     end
 
-    f:close()
+    return table.concat(lines, "\n") .. "\n"
 end
 
 local function pushMetrics(body)
@@ -202,28 +211,15 @@ local function loop()
 
     os.sleep(0) -- yield to allow GC
 
-    local ok, err = pcall(collectMetricsToFile)
-    if not ok then
-        io.stderr:write("Collect failed: " .. tostring(err) .. "\n")
-        os.sleep(PUSH_INTERVAL)
-        return true
-    end
-
-    -- Yield to free iterator/temp objects before reading file
-    os.sleep(0)
-
-    -- Read metrics file and push
-    local f = io.open(METRICS_FILE, "r")
-    local body = f:read("*a")
-    f:close()
-
-    local pushed = pushMetrics(body)
-    local size = #body
-    body = nil
-    os.sleep(0) -- yield to free body string
-
-    if pushed then
-        print(fmt("pushed metrics (%d bytes)", size))
+    local ok, body = pcall(buildMetrics)
+    if ok then
+        local pushed = pushMetrics(body)
+        if pushed then
+            print(fmt("pushed metrics (%d bytes)", #body))
+        end
+        body = nil
+    else
+        io.stderr:write("Collect failed: " .. tostring(body) .. "\n")
     end
 
     os.sleep(PUSH_INTERVAL)
@@ -234,6 +230,9 @@ local function main()
     print("AE2 Monitor starting")
     print("Pushgateway: " .. config.pushgateway_url)
     print("Interval: " .. PUSH_INTERVAL .. "s")
+    if #watchlist > 0 then
+        print("Watching " .. #watchlist .. " items")
+    end
     print("Press 'q' to exit")
 
     events.initEvents()
@@ -242,7 +241,6 @@ local function main()
     while loop() do end
 
     events.unhookEvents()
-    os.remove(METRICS_FILE)
     print("AE2 Monitor stopped")
 end
 
