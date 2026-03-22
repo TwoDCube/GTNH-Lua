@@ -200,7 +200,7 @@ local function loop()
         return false
     end
 
-    collectgarbage("collect")
+    os.sleep(0) -- yield to allow GC
 
     local ok, err = pcall(collectMetricsToFile)
     if not ok then
@@ -209,8 +209,8 @@ local function loop()
         return true
     end
 
-    -- Free iterator/temp objects before reading file
-    collectgarbage("collect")
+    -- Yield to free iterator/temp objects before reading file
+    os.sleep(0)
 
     -- Read metrics file and push
     local f = io.open(METRICS_FILE, "r")
@@ -220,7 +220,7 @@ local function loop()
     local pushed = pushMetrics(body)
     local size = #body
     body = nil
-    collectgarbage("collect")
+    os.sleep(0) -- yield to free body string
 
     if pushed then
         print(fmt("pushed metrics (%d bytes)", size))
