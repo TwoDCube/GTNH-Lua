@@ -99,7 +99,7 @@ end
 
 -- Yield multiple times to force incremental GC to free objects
 local function forceGC()
-    for i = 1, 20 do os.sleep(0) end
+    os.sleep(1)
 end
 
 local function loop()
