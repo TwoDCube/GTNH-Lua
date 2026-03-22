@@ -97,33 +97,48 @@ local function sanitize(s)
     return s:gsub('\\', '\\\\'):gsub('"', '\\"'):gsub('\n', '\\n')
 end
 
+-- Safe wrapper: returns 0 if the ME call fails
+local function safeCall(fn, ...)
+    local ok, result = pcall(fn, ...)
+    if ok then return result end
+    return nil
+end
+
 local function buildMetrics()
     local lines = {}
     local function add(s) lines[#lines + 1] = s end
 
     -- Power metrics
+    local powerIn = safeCall(me.getAvgPowerInjection) or 0
+    local powerOut = safeCall(me.getAvgPowerUsage) or 0
+    local powerStored = safeCall(me.getStoredPower) or 0
+    local powerMax = safeCall(me.getMaxStoredPower) or 0
+
     add("# HELP ae2_power_injection Average power injection (AE/t)")
     add("# TYPE ae2_power_injection gauge")
-    add(fmt("ae2_power_injection %.2f", me.getAvgPowerInjection()))
+    add(fmt("ae2_power_injection %.2f", powerIn))
 
     add("# HELP ae2_power_usage Average power usage (AE/t)")
     add("# TYPE ae2_power_usage gauge")
-    add(fmt("ae2_power_usage %.2f", me.getAvgPowerUsage()))
+    add(fmt("ae2_power_usage %.2f", powerOut))
 
     add("# HELP ae2_power_stored Stored power (AE)")
     add("# TYPE ae2_power_stored gauge")
-    add(fmt("ae2_power_stored %.2f", me.getStoredPower()))
+    add(fmt("ae2_power_stored %.2f", powerStored))
 
     add("# HELP ae2_power_max Maximum power capacity (AE)")
     add("# TYPE ae2_power_max gauge")
-    add(fmt("ae2_power_max %.2f", me.getMaxStoredPower()))
+    add(fmt("ae2_power_max %.2f", powerMax))
 
     -- Item totals via allItems() - only count, no per-item strings
     local itemTypes = 0
     local totalItems = 0
-    for item in me.allItems() do
-        itemTypes = itemTypes + 1
-        totalItems = totalItems + item.size
+    local iter = safeCall(me.allItems)
+    if iter then
+        for item in iter do
+            itemTypes = itemTypes + 1
+            totalItems = totalItems + (item.size or 0)
+        end
     end
 
     add("# HELP ae2_item_types Total unique item types")
@@ -135,12 +150,14 @@ local function buildMetrics()
     add(fmt("ae2_items_total %.0f", totalItems))
 
     -- Crafting CPU metrics
-    local cpus = me.getCpus()
+    local cpus = safeCall(me.getCpus)
     local cpuTotal = 0
     local cpuBusy = 0
-    for _, cpu in ipairs(cpus) do
-        cpuTotal = cpuTotal + 1
-        if cpu.busy then cpuBusy = cpuBusy + 1 end
+    if cpus then
+        for _, cpu in ipairs(cpus) do
+            cpuTotal = cpuTotal + 1
+            if cpu.busy then cpuBusy = cpuBusy + 1 end
+        end
     end
 
     add("# HELP ae2_cpus_total Total crafting CPUs")
