@@ -110,7 +110,8 @@ local function loop()
 
     -- Aggressively yield to free previous cycle's garbage
     forceGC()
-    print(fmt("[pre] free: %.0fK", computer.freeMemory() / 1024))
+
+    local cycleOk, cycleErr = pcall(function()
 
     -- Phase 1: iterate allItems() → seen table (dedup) + totals
     local seen = {}
@@ -208,6 +209,12 @@ local function loop()
 
     if pushed then
         print(fmt("pushed %dB [free: %.0fK]", size, computer.freeMemory() / 1024))
+    end
+
+    end) -- end pcall
+
+    if not cycleOk then
+        io.stderr:write("Cycle failed: " .. tostring(cycleErr) .. "\n")
     end
 
     os.sleep(PUSH_INTERVAL)
