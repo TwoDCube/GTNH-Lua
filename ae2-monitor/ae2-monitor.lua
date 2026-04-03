@@ -205,22 +205,26 @@ local function loop()
         add(fmt("ae2_cpus_busy %d", b))
     end
 
-    -- Fluid metrics from watchlist (no getFluidsInNetwork!)
+    -- Fluid metrics from watchlist (filter client-side, API ignores filter param)
     if #watchlist.fluids > 0 then
-        add("# HELP ae2_fluid_amount Fluid stored (mB)")
-        add("# TYPE ae2_fluid_amount gauge")
-        for _, entry in ipairs(watchlist.fluids) do
-            local filter = {name = entry.name}
-            local results = safeCall(me.getFluidsInNetwork, filter)
-            if results then
-                local total = 0
-                local label = ""
-                for _, fluid in ipairs(results) do
-                    total = total + (fluid.amount or fluid.size or 0)
-                    if fluid.label and fluid.label ~= "" then label = fluid.label end
+        local allFluids = safeCall(me.getFluidsInNetwork)
+        if allFluids then
+            local fluidByName = {}
+            for _, fluid in ipairs(allFluids) do
+                if fluid.name then
+                    fluidByName[fluid.name] = fluid
                 end
+            end
+            allFluids = nil
+
+            add("# HELP ae2_fluid_amount Fluid stored (mB)")
+            add("# TYPE ae2_fluid_amount gauge")
+            for _, entry in ipairs(watchlist.fluids) do
+                local fluid = fluidByName[entry.name]
+                local amount = fluid and (fluid.amount or fluid.size or 0) or 0
+                local label = fluid and fluid.label or ""
                 add(fmt('ae2_fluid_amount{name="%s",label="%s"} %.0f',
-                    sanitize(entry.name), sanitize(label), total))
+                    sanitize(entry.name), sanitize(label), amount))
             end
         end
     end
