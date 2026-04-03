@@ -10,6 +10,7 @@ local WATCHLIST_PATH = "/etc/ae2-watchlist.cfg"
 local JOB_NAME       = "ae2_monitor"
 local INSTANCE       = "main"
 local PUSH_INTERVAL  = 30
+local LGT_PORT       = 1337
 
 -----------------------------------------------------------------------
 local function copyIfMissing(target, example)
@@ -94,6 +95,16 @@ local watchlist = loadWatchlist(WATCHLIST_PATH)
 local authHeader = "Basic " .. base64encode(config.username .. ":" .. config.password)
 local me = component.me_interface
 local inet = component.internet
+local modem = component.modem
+
+-- LGT battery data from broadcast
+local lgtEU = {current = nil, total = nil}
+local function onBatteryData(_, _, _, _, _, msgType, current, total)
+    if msgType == "lgt_battery" then
+        lgtEU.current = current
+        lgtEU.total = total
+    end
+end
 local fmt = string.format
 local pushUrl = fmt("%s/metrics/job/%s/instance/%s",
     config.pushgateway_url, JOB_NAME, INSTANCE)
@@ -229,6 +240,16 @@ local function loop()
         end
     end
 
+    -- LGT battery metrics from modem broadcast
+    if lgtEU.current then
+        add("# HELP lgt_eu_stored Current EU stored in LGT battery")
+        add("# TYPE lgt_eu_stored gauge")
+        add(fmt("lgt_eu_stored %.0f", lgtEU.current))
+        add("# HELP lgt_eu_max Maximum EU capacity of LGT battery")
+        add("# TYPE lgt_eu_max gauge")
+        add(fmt("lgt_eu_max %.0f", lgtEU.total))
+    end
+
     forceGC()
 
     local body = table.concat(lines, "\n") .. "\n"
@@ -254,14 +275,20 @@ end
 local function main()
     print("AE2 Monitor starting")
     print(fmt("Watchlist: %d items, %d fluids", #watchlist.items, #watchlist.fluids))
+    print(fmt("Listening for LGT broadcasts on port %d", LGT_PORT))
     print(fmt("Free: %.0fK", computer.freeMemory() / 1024))
     print("Press 'q' to exit")
+
+    modem.open(LGT_PORT)
+    event.listen("modem_message", onBatteryData)
 
     events.initEvents()
     events.hookEvents()
 
     while loop() do end
 
+    event.ignore("modem_message", onBatteryData)
+    modem.close(LGT_PORT)
     events.unhookEvents()
     print("AE2 Monitor stopped")
 end
