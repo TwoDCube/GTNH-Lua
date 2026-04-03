@@ -1,5 +1,14 @@
-# AE2 item watchlist - one item per line
-# Format: modid:itemname or modid:itemname:damage
+# AE2 watchlist - only items and fluids listed here will be monitored.
+# This prevents OOM from querying all items/fluids in the network.
+
+[items]
+# One item per line: modid:itemname or modid:itemname:damage
 # Examples:
 # minecraft:iron_ingot
 # gregtech:gt.metaitem.01:32072
+
+[fluids]
+# One fluid per line: modid:fluidname
+# Examples:
+# minecraft:water
+# ic2:uu_matter

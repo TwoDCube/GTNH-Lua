@@ -5,10 +5,11 @@ local component = require('component')
 local computer = require('computer')
 local event = require('event')
 
-local CONFIG_PATH = "/etc/ae2-monitor.cfg"
-local JOB_NAME    = "ae2_monitor"
-local INSTANCE    = "main"
-local PUSH_INTERVAL = 30
+local CONFIG_PATH    = "/etc/ae2-monitor.cfg"
+local WATCHLIST_PATH = "/etc/ae2-watchlist.cfg"
+local JOB_NAME       = "ae2_monitor"
+local INSTANCE       = "main"
+local PUSH_INTERVAL  = 30
 
 -----------------------------------------------------------------------
 local function copyIfMissing(target, example)
@@ -38,6 +39,39 @@ local function loadConfig(path)
     return cfg
 end
 
+local function loadWatchlist(path)
+    copyIfMissing(path, path .. ".example")
+    local f = io.open(path, "r")
+    if not f then return {items = {}, fluids = {}} end
+    local wl = {items = {}, fluids = {}}
+    local section = "items"
+    for line in f:lines() do
+        line = line:match("^%s*(.-)%s*$")
+        if line == "" or line:sub(1, 1) == "#" then
+            -- skip
+        elseif line:match("^%[(.-)%]$") then
+            section = line:match("^%[(.-)%]$")
+        elseif section == "items" or section == "fluids" then
+            if section == "fluids" then
+                table.insert(wl.fluids, {name = line})
+            else
+                local parts = {}
+                for part in line:gmatch("[^:]+") do
+                    table.insert(parts, part)
+                end
+                if #parts >= 3 and tonumber(parts[#parts]) then
+                    local damage = tonumber(table.remove(parts))
+                    table.insert(wl.items, {name = table.concat(parts, ":"), damage = damage})
+                else
+                    table.insert(wl.items, {name = line})
+                end
+            end
+        end
+    end
+    f:close()
+    return wl
+end
+
 local function base64encode(data)
     local b = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'
     return ((data:gsub('.', function(x)
@@ -56,6 +90,7 @@ end
 
 -----------------------------------------------------------------------
 local config = loadConfig(CONFIG_PATH)
+local watchlist = loadWatchlist(WATCHLIST_PATH)
 local authHeader = "Basic " .. base64encode(config.username .. ":" .. config.password)
 local me = component.me_interface
 local inet = component.internet
@@ -113,37 +148,11 @@ local function loop()
 
     local cycleOk, cycleErr = pcall(function()
 
-    -- Phase 1: iterate allItems() → seen table (dedup) + totals
-    local seen = {}
-    local itemTypes = 0
-    local totalItems = 0
-    local ok = pcall(function()
-        for item in me.allItems() do
-            itemTypes = itemTypes + 1
-            local size = item.size or 0
-            totalItems = totalItems + size
-            if size >= 1 then
-                local key = (item.name or "") .. "|" .. (item.label or "") .. "|" .. (item.damage or 0)
-                seen[key] = (seen[key] or 0) + size
-            end
-        end
-    end)
-
-    if not ok then
-        seen = nil
-        io.stderr:write("allItems failed\n")
-        os.sleep(PUSH_INTERVAL)
-        return true
-    end
-
-    -- Free iterator proxy objects before building strings
-    forceGC()
-
-    -- Phase 2: build body from seen table + other metrics
     local lines = {}
     local n = 0
     local function add(s) n = n + 1 lines[n] = s end
 
+    -- Power metrics
     add("# HELP ae2_power_injection Average power injection (AE/t)")
     add("# TYPE ae2_power_injection gauge")
     add(fmt("ae2_power_injection %.2f", safeCall(me.getAvgPowerInjection) or 0))
@@ -157,22 +166,30 @@ local function loop()
     add("# TYPE ae2_power_max gauge")
     add(fmt("ae2_power_max %.2f", safeCall(me.getMaxStoredPower) or 0))
 
-    add("# HELP ae2_item_types Total unique item types")
-    add("# TYPE ae2_item_types gauge")
-    add(fmt("ae2_item_types %d", itemTypes))
-    add("# HELP ae2_items_total Total items stored")
-    add("# TYPE ae2_items_total gauge")
-    add(fmt("ae2_items_total %.0f", totalItems))
-
-    add("# HELP ae2_item_count Items stored per type")
-    add("# TYPE ae2_item_count gauge")
-    for key, size in pairs(seen) do
-        local name, label, damage = key:match("^(.-)|(.-)|(.+)$")
-        add(fmt('ae2_item_count{name="%s",label="%s",damage="%s"} %.0f',
-            sanitize(name), sanitize(label), damage, size))
+    -- Item metrics from watchlist (no allItems!)
+    if #watchlist.items > 0 then
+        add("# HELP ae2_item_count Items stored per type")
+        add("# TYPE ae2_item_count gauge")
+        for _, entry in ipairs(watchlist.items) do
+            local filter = {name = entry.name}
+            if entry.damage then filter.damage = entry.damage end
+            local results = safeCall(me.getItemsInNetwork, filter)
+            if results then
+                local total = 0
+                local label = ""
+                for _, item in ipairs(results) do
+                    total = total + (item.size or 0)
+                    if item.label and item.label ~= "" then label = item.label end
+                end
+                add(fmt('ae2_item_count{name="%s",label="%s",damage="%s"} %.0f',
+                    sanitize(entry.name), sanitize(label), entry.damage or 0, total))
+            end
+        end
     end
-    seen = nil
 
+    forceGC()
+
+    -- CPU metrics
     local cpus = safeCall(me.getCpus)
     if cpus then
         local t, b = 0, 0
@@ -188,17 +205,26 @@ local function loop()
         add(fmt("ae2_cpus_busy %d", b))
     end
 
-    local fluids = safeCall(me.getFluidsInNetwork)
-    if fluids then
+    -- Fluid metrics from watchlist (no getFluidsInNetwork!)
+    if #watchlist.fluids > 0 then
         add("# HELP ae2_fluid_amount Fluid stored (mB)")
         add("# TYPE ae2_fluid_amount gauge")
-        for _, fluid in ipairs(fluids) do
-            add(fmt('ae2_fluid_amount{name="%s",label="%s"} %.0f',
-                sanitize(fluid.name), sanitize(fluid.label), fluid.amount or fluid.size or 0))
+        for _, entry in ipairs(watchlist.fluids) do
+            local filter = {name = entry.name}
+            local results = safeCall(me.getFluidsInNetwork, filter)
+            if results then
+                local total = 0
+                local label = ""
+                for _, fluid in ipairs(results) do
+                    total = total + (fluid.amount or fluid.size or 0)
+                    if fluid.label and fluid.label ~= "" then label = fluid.label end
+                end
+                add(fmt('ae2_fluid_amount{name="%s",label="%s"} %.0f',
+                    sanitize(entry.name), sanitize(label), total))
+            end
         end
     end
 
-    -- Free seen before concat
     forceGC()
 
     local body = table.concat(lines, "\n") .. "\n"
@@ -223,6 +249,7 @@ end
 
 local function main()
     print("AE2 Monitor starting")
+    print(fmt("Watchlist: %d items, %d fluids", #watchlist.items, #watchlist.fluids))
     print(fmt("Free: %.0fK", computer.freeMemory() / 1024))
     print("Press 'q' to exit")
 
