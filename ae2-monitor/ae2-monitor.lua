@@ -97,6 +97,9 @@ local me = component.me_interface
 local inet = component.internet
 local modem = component.modem
 
+-- Cached fluid labels to keep series stable when fluids disappear
+local fluidLabelCache = {}
+
 -- LGT battery data from broadcast
 local lgtEU = {current = nil, total = nil}
 local function onBatteryData(_, _, _, _, _, msgType, current, total)
@@ -233,7 +236,10 @@ local function loop()
             for _, entry in ipairs(watchlist.fluids) do
                 local fluid = fluidByName[entry.name]
                 local amount = fluid and (fluid.amount or fluid.size or 0) or 0
-                local label = fluid and fluid.label or ""
+                if fluid and fluid.label and fluid.label ~= "" then
+                    fluidLabelCache[entry.name] = fluid.label
+                end
+                local label = fluidLabelCache[entry.name] or ""
                 add(fmt('ae2_fluid_amount{name="%s",label="%s"} %.0f',
                     sanitize(entry.name), sanitize(label), amount))
             end
